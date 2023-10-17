@@ -1,3 +1,4 @@
+
 import json
 import boto3
 import random
@@ -18,6 +19,7 @@ def connect():
 
     try:
         if 'Messages' in resp:
+            print("There are messages in Resp")
             message_attribute = resp['Messages'][0]
             query = json.loads(message_attribute['Body'])
             receipt_handle = message_attribute['ReceiptHandle']

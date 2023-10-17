@@ -5,8 +5,8 @@ import random
 from boto3.dynamodb.conditions import Key, Attr
 
 def connect():
-    sqs_client = boto3.client('sqs')
-    sqs_url = 'https://sqs.us-east-1.amazonaws.com/726664406105/DiningSuggestionsQueue'
+    sqs_client = boto3.client('sqs', region_name='us-east-1')
+    sqs_url = 'https://sqs.us-east-1.amazonaws.com/726664406105/resq'
 
     resp = sqs_client.receive_message(
         QueueUrl=sqs_url, 

@@ -3,12 +3,64 @@ import json
 import boto3
 import random
 from boto3.dynamodb.conditions import Key, Attr
+def getRestaurantFromES(cuisine):
+    region = 'us-east-1'
+    service = 'es'
 
-def connect():
-    sqs_client = boto3.client('sqs', region_name='us-east-1')
-    sqs_url = 'https://sqs.us-east-1.amazonaws.com/726664406105/resq'
+    # Create an AWS session
+    session = boto3.Session(region_name=region)
+    credentials = session.get_credentials()
 
-    resp = sqs_client.receive_message(
+    # Set the Elasticsearch host and index
+    host = 'search-restaurants-qq3egiabgr6mjj2q46kkw25v5a.us-east-1.es.amazonaws.com'
+    index = 'restaurants'
+
+    # Initialize the Elasticsearch client using boto3
+    es_client = boto3.client('es', region_name=region)
+
+    # Define the search query
+    query = {
+        "size": 1300,
+        "query": {
+            "query_string": {
+                "default_field": "cuisine",
+                "query": cuisine
+            }
+        }
+    }
+
+    # Execute the Elasticsearch query
+    es_response = es_client.search(
+        ElasticsearchDomain=host,
+        Index=index,
+        Body=json.dumps(query)
+    )
+    
+    rest_resp = json.loads(es_response['body'].read().decode('utf-8'))
+    print(rest_resp)
+
+    hits = rest_resp['hits']['hits']
+    restaurantIds = []
+    for hit in hits:
+        restaurantIds.append(str(hit['_source']['Business ID']))
+    
+    return restaurantIds
+
+def getRestaurantFromDynamoDb(restaurantIds):
+    restaurant = []
+    client = boto3.resource('dynamodb')
+    table = client.Table('yelp-restaurants')
+    for restaurantId in restaurantIds:
+        response = table.get_item(Key={'Business ID': restaurantId})
+        restaurant.append(response)
+    return restaurant
+    
+    
+def lambda_handler(event, context):
+
+    sqs = boto3.client('sqs')
+    sqs_url = "https://sqs.us-east-1.amazonaws.com/726664406105/helloworld"
+    resp = sqs.receive_message(
         QueueUrl=sqs_url, 
         AttributeNames=['SentTimestamp'],
         MessageAttributeNames=['All'],
@@ -16,74 +68,61 @@ def connect():
         MaxNumberOfMessages=1,
         WaitTimeSeconds=0
     )
+    print("resp:", resp)
+    message = resp['Messages'][0]
+    if message is None:
+        print("Empty message")
+    else:
+        print("Not Empty Message")
+    sqs.delete_message(
+            QueueUrl=sqs_url,
+            ReceiptHandle=message['ReceiptHandle']
+        )
+    print('Received and deleted message: %s' % resp)
+    print("Message: ", message)
+    
+    
+    message = json.loads(message["Body"])
+    cuisine = message["Cuisine"]
+    location = message["Location"]
+    time = message["DiningTime"]
+    numOfPeople = message["NumberOfPeople"]
+    contact = message["Contact"]
+    # phoneNumber = "+1" + phoneNumber
+    if not cuisine:
+        print("No Cuisine or PhoneNum key found in message")
+    else:
+        print("Successfully parse message from queue")
+        
+    rest = getRestaurantFromES(cuisine)
 
-    try:
-        if 'Messages' in resp:
-            print("There are messages in Resp")
-            message_attribute = resp['Messages'][0]
-            query = json.loads(message_attribute['Body'])
-            receipt_handle = message_attribute['ReceiptHandle']
-            sqs_client.delete_message(QueueUrl=sqs_url, ReceiptHandle=receipt_handle)
-            return query
-    except: 
-        print("Pull SQS message failed")
-        return {}
+    messageToSend = 'Hello! Here are my {cuisine} restaurant suggestions in {location} for {p} people/person: {}'.format(
+            cuisine=cuisine,
+            location=location,
+            p = numOfPeople,
+            r = rest
+            
+    )
+    
+    ses = boto3.client('ses', region_name='us-east-1')  # Use the appropriate region.
 
-def loadsInit(received):
-    msg_detail = received
-    location = msg_detail['Location']
-    cuisine_type = msg_detail['Cuisine']
-    rev_time = msg_detail['DiningTime']
-    num_people = msg_detail['NumberOfPeople']
-    phone_num = msg_detail['Contact']
-    send_message = "Hello! Here are my {} restaurant suggestions in Manhattan for {} people for today at {}".format(cuisine_type, num_people, rev_time)
-    return phone_num, send_message, cuisine_type
+    # Define your email content
+    sender = 'yueqili0816@gmail.com'
+    recipient = contact
+    subject = "Your Customized Resaraunt Recommendations"
 
-def recommend(cuisine):
-    cuisine_to_restaurants = {
-        'chinese': ['restaurant_id_1', 'restaurant_id_2', 'restaurant_id_3'],
-        'italian': ['restaurant_id_4', 'restaurant_id_5', 'restaurant_id_6'],
-        # ... other cuisines and their restaurant IDs
-    }
-    return cuisine_to_restaurants.get(cuisine, [])
+    # Send the email
+    response = ses.send_email(
+        Source=sender,
+        Destination={'ToAddresses': [recipient]},
+        Message={
+            'Subject': {'Data': subject},
+            'Body': {'Text': {'Data': messageToSend}}
+        }
+    )
 
-def searchDB(recommendsID, send_message):
-    dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table('yelp-restaurants')
-
-    for track, id in enumerate(recommendsID, 1):
-        response = table.scan(FilterExpression=Attr('id').eq(id))
-        try: 
-            item = response['Items'][0]
-            name = item["name"]
-            address = ' '.join(item["address"])
-            curMsg = ' {0}. {1}, located at {2}.'.format(track, name, address)
-            send_message += curMsg
-        except:
-            print("DynamoDB Response Failed")
-
-    send_message += " Enjoy your meal!"
-    return send_message
-
-def sendSNS(phone_num, message):
-    final_num = phone_num if phone_num.startswith('+1') else '+1' + phone_num
-    client = boto3.client('sns')
-    try:
-        response = client.publish(PhoneNumber=final_num, Message=message)
-    except KeyError:
-        print("SNS send failed")
-
-def lambda_handler(event, context):
-    received = connect()
-    if not received:
-        return {'statusCode': 200, 'body': json.dumps("No message in SQS, LF2 exited early.")}
-
-    phone_num, send_message, cuisine_type = loadsInit(received)
-    recommendsID = recommend(cuisine_type)
-    if not recommendsID:
-        return {'statusCode': 200, 'body': json.dumps("No recommendations found for given cuisine, LF2 exited early.")}
-
-    final_message = searchDB(recommendsID, send_message)
-    sendSNS(phone_num, final_message)
-
+    print("Sns_Response: ", sns_resp)
+    
+    
+    
     return {'statusCode': 200, 'body': json.dumps("LF2 running successfully")}
